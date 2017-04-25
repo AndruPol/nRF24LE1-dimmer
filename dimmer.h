@@ -8,6 +8,9 @@
 #ifndef DIMMER_H_
 #define DIMMER_H_
 
+#define DIMMERMIN		20
+#define DIMMERMAX		100
+
 void dimmer_init(void);
 uint8_t dimmer_run(uint8_t percent);
 void dimmer_stop(void);

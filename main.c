@@ -60,6 +60,7 @@
 #endif
 
 CONFIG_T config;
+static volatile uint8_t ex_sw;
 
 // halt
 static void halt(void) {
@@ -70,9 +71,6 @@ static void halt(void) {
 #endif
 	}
 }
-
-// radio interrupt in radio.c
-interrupt_isr_rfirq();
 
 // T0 interrupt in dimmer.c
 interrupt_isr_t0();
@@ -217,15 +215,12 @@ void main(void) {
 			GPIO_PIN_CONFIG_OPTION_DIR_INPUT
 			| GPIO_PIN_CONFIG_OPTION_PIN_MODE_INPUT_BUFFER_ON_NO_RESISTORS
 	);
+	ex_sw = gpio_pin_val_read(SWPIN);
 #endif
 
 #if EN_WDG
 	watchdog_setup();
 	watchdog_set_wdsv_count(watchdog_calc_timeout_from_sec(WDGTIMEOUT));
-#endif
-
-#if EN_RF
- 	radio_init();
 #endif
 
 #if EN_RTC
@@ -246,50 +241,50 @@ void main(void) {
  	}
 #endif
 
+#if EN_RF
+ 	radio_init();
+#endif
+
 	dimmer_init();
 
-	if (config.state) {
-		if (config.percent >= 10 && config.percent <= 100) {
+	if (ex_sw && config.state) {
+		if (config.percent >= DIMMERMIN && config.percent <= DIMMERMAX) {
 			dimmer_run(config.percent);
-			send_dimmer(config.percent, DIMMER_OK);
 		}
 	}
+	send_dimmer(dimmer_state() ? config.percent : 0, DIMMER_OK);
 
 	while(1) {
 
-		message.deviceID = config.deviceID;
-		message.firmware = FIRMWARE;
-
 #if EN_RTC
 		if (config.report > 0 && rtc_counter == 0) {
-			if (dimmer_state())
-				send_dimmer(config.percent, DIMMER_OK);
-			else
-				send_dimmer(0, DIMMER_OK);
+			send_dimmer(dimmer_state() ? config.percent : 0, DIMMER_OK);
 			rtc_counter = config.report;
 		}
 #endif
 
 #if EN_SW
-		if (gpio_pin_val_read(SWPIN)) {
-			if (!dimmer_state() && config.percent >= 10 && config.percent <= 100) {
+		cmd = gpio_pin_val_read(SWPIN);
+		if (!ex_sw && cmd) {
+			if (!dimmer_state() && config.percent >= DIMMERMIN && config.percent <= DIMMERMAX) {
 				dimmer_run(config.percent);
 				send_dimmer(config.percent, DIMMER_OK);
 			};
-		} else {
+		} else if (ex_sw && !cmd) {
 			if (dimmer_state()) {
 				dimmer_stop();
 				send_dimmer(0, DIMMER_OK);
 			}
 		}
+		ex_sw = cmd;
 #endif
 
 WAITCMD:
-		// check receive command from smarthome gateway
+		// check received command from smarthome gateway
 		cmd = 0;
-		if (rx_count--) {
+//		if (rf_rxdata()) {
 			cmd = rfreadqueue(&message);
-		}
+//		}
 
 		if (cmd && message.deviceID == config.deviceID && message.msgType == SENSOR_CMD) {
 #if DEBUG
@@ -301,11 +296,11 @@ WAITCMD:
 			if (message.address == ADDR_DIMMER) {
 				switch (message.command) {
 				case CMD_ON:
-					if (config.percent >= 10 && config.percent <= 100) {
+					if (config.percent >= DIMMERMIN && config.percent <= DIMMERMAX) {
 						dimmer_run(config.percent);
 						send_dimmer(config.percent, DIMMER_OK);
 					} else {
-						send_dimmer(0, DIMMER_PARAM);
+						send_dimmer(dimmer_state() ? config.percent : 0, DIMMER_PARAM);
 					}
 					break;
 				case CMD_OFF:
@@ -313,12 +308,12 @@ WAITCMD:
 					send_dimmer(0, DIMMER_OK);
 					break;
 				case CMD_ONTM:
-					if (message.data.iValue >= 10 && message.data.iValue <= 100) {
+					if (message.data.iValue >= DIMMERMIN && message.data.iValue <= DIMMERMAX) {
 						config.percent = message.data.iValue;
 						dimmer_run(message.data.iValue);
 						send_dimmer(message.data.iValue, DIMMER_OK);
 					} else {
-						send_dimmer(0, DIMMER_PARAM);
+						send_dimmer(dimmer_state() ? config.percent : 0, DIMMER_PARAM);
 					}
 					break;
 				default:
@@ -363,7 +358,7 @@ WAITCMD:
 					if (message.command == CMD_CFGREAD) {
 						send_config(CFG_PERCENT, config.percent);
 					} else {
-						if (message.data.iValue < 10 || message.data.iValue > 100) {
+						if (message.data.iValue < DIMMERMIN || message.data.iValue > DIMMERMAX) {
 						    send_config_err(CFG_PERCENT, CFGSET_PARAM);
 						    break;
 						}

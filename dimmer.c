@@ -29,16 +29,15 @@ static volatile uint8_t ch_on = 0, ch_pulse;
 // timer0 overflow isr
 interrupt_isr_t0() {
 	timer0_stop();
-	if (ch_on) {
-		if (!ch_pulse) {
-			gpio_pin_val_set(OUTPIN);
-			ch_pulse = 1;
-			timer0_set_t0_val(PULSE190US);
-			timer0_run();
-		} else {
-			gpio_pin_val_clear(OUTPIN);
-			ch_pulse = 0;
-		}
+	if (! ch_on) return;
+	if (! ch_pulse) {
+		gpio_pin_val_set(OUTPIN);
+		ch_pulse = 1;
+		timer0_set_t0_val(PULSE190US);
+		timer0_run();
+	} else {
+		gpio_pin_val_clear(OUTPIN);
+		ch_pulse = 0;
 	}
 #if 0
 	printf("t0 isr fired\r\n");
@@ -47,6 +46,7 @@ interrupt_isr_t0() {
 
 // zero cross detector isr
 interrupt_isr_ifp() {
+	gpio_pin_val_clear(OUTPIN);
 	timer0_stop();
 	if (ch_on) {
 		timer0_set_t0_val(ch_delay);
@@ -121,11 +121,11 @@ void  dimmer_init(void) {
 	interrupt_control_global_enable();
 }
 
-// start dimmer with percent value in range 10-100%
+// start dimmer with percent value in range 20-100%
 uint8_t dimmer_run(uint8_t percent) {
-	if (percent < 10 || percent > 100) return 0;
+	if (percent < DIMMERMIN || percent > DIMMERMAX) return 0;
 	if (ch_on) ch_on = 0;
-	ch_delay = (uint16_t) 0xFF00 | (255 + (percent - 100));
+	ch_delay = (uint16_t) 0xFF00 | (254 + (percent - 100));
 	ch_pulse = 0;
 	ch_on = 1;
 

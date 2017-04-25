@@ -4,6 +4,8 @@
 #include "rf.h"
 #include "main.h"
 
+#define SENDTMO		301 // 300*10us + 1 = 3ms
+
 #if EN_AES
 #define AES_TINY	1
 #if AES_TINY
@@ -15,8 +17,6 @@ aes_data_t aes_data;
 #endif
 MESSAGE_T aesbuf;
 #endif
-
-volatile uint8_t rx_count;	// RX_DR isr counter
 
 ///////////////////////////////////////////
 // Inline function definitions
@@ -45,12 +45,6 @@ unsigned char enc_dec_accel_galois_multiply(unsigned char a, unsigned char b)
 
 	//Return the result of the hardware GF(2^8) multiplication
 	return CCPDATO;
-}
-
-
-interrupt_isr_rfirq() {
-	if (rf_irq_rx_dr_active())
-		rx_count++;
 }
 
 void radio_init() {
@@ -105,13 +99,10 @@ void radio_init() {
 
 	rf_write_register(RF_RF_SETUP, &setup, 1);
 
-	interrupt_control_rfirq_enable();
-	interrupt_control_global_enable();
-
 	rf_set_as_rx(true);											 //change the device to an RX to get the character back from the other 24L01
 }
 
-void rfsend(const MESSAGE_T *msg) {
+uint8_t rfsend(const MESSAGE_T *msg) {
 	uint16_t timeout;
 	uint8_t retry = config.maxsend;
 #if EN_AES
@@ -126,13 +117,13 @@ void rfsend(const MESSAGE_T *msg) {
 		memcpy(&aesbuf, msg, MSGLEN);
 	}
 #endif
-start:
-	timeout = 300;	// 300*10us = 3ms
-	if (rf_tx_fifo_is_full())
-		rf_flush_tx();
-
-	rf_irq_clear(RF_STATUS_TX_DS | RF_STATUS_MAX_RT); //clear send interrupts in the 24LE1
 	rf_set_as_tx(); //resume normal operation as a TX
+
+start:
+	timeout = SENDTMO;
+	if (rf_tx_fifo_is_full()) rf_flush_tx();
+	rf_irq_clear_all();
+
 #if EN_AES
 	rf_write_tx_payload((uint8_t*) aesbuf, MSGLEN, true); //transmit received char over RF
 #else
@@ -140,38 +131,50 @@ start:
 #endif
 
 	//wait until the packet has been sent or the maximum number of retries has been reached
-	while(!(rf_irq_pin_active() && (rf_irq_tx_ds_active() || rf_irq_max_rt_active()))) {
-		if (timeout-- == 0) { // checking timeout if nothing
-			if (retry-- > 0)
-				goto start;
-			else
-				break;
-		}
+	while(--timeout) {
+		if (rf_irq_pin_active() && (rf_irq_tx_ds_active() || rf_irq_max_rt_active())) break;
 		delay_us(10);	// 10us
 	}
-	if (rf_irq_pin_active() && rf_irq_max_rt_active()) { // checking max_rt bit
-		if (retry-- > 0)
-			goto start;
+
+	if (rf_irq_pin_active() && rf_irq_tx_ds_active()) {   // checking tx_ds bit
+#if DEBUG
+		printf("received tx_ds\r\n");
+#endif
+		rf_irq_clear_all();
+		rf_set_as_rx(true);								  //change the device to an RX to get the character back from the other 24L01
+		return true;
 	}
 
-	rf_irq_clear(RF_STATUS_TX_DS | RF_STATUS_MAX_RT); //clear send interrupts in the 24LE1
-	rf_set_as_rx(true);								  //change the device to an RX to get the character back from the other 24L01
+	if (rf_irq_pin_active() && rf_irq_max_rt_active()) {  // checking max_rt bit
+#if DEBUG
+		printf("received max_rt\r\n");
+#endif
+		if (--retry) goto start;
+	}
+
+	if (!timeout) { // checking timeout if nothing
+#if DEBUG
+		printf("no irq received\r\n");
+#endif
+		if (--retry) goto start;
+	}
+
+	rf_irq_clear_all();
+	rf_set_as_rx(true);	//change the device to an RX to get the character back from the other 24L01
+	return false;
 }
 
 // blocking read NRF24LE1, timeout in 10us intervals
 uint8_t rfread(MESSAGE_T *msg, uint16_t timeout) {
 	uint8_t status, state = 0;
-	rf_set_as_rx(true); //change the device to an RX to get the character back from the other 24L01
-	rf_irq_clear(RF_STATUS_RX_DR); //clear receive interrupts in the 24LE1
 
-	while (timeout-- > 0) {
-		//wait a while to see if we get the data back (change the loop maximum and the lower if
-		//  argument (should be loop maximum - 1) to lengthen or shorten this time frame
-		if((rf_irq_pin_active() && rf_irq_rx_dr_active())) {
+	rf_irq_clear_all();
+	while (--timeout) {
+		if(rf_irq_pin_active() && rf_irq_rx_dr_active()) {
 #if EN_AES
 			status = rf_read_rx_payload((uint8_t *) aesbuf, MSGLEN); //get the payload into data
 #else
-			status = rf_read_rx_payload((uint8_t *) msg, MSGLEN); //get the payload into data
+			status = rf_read_rx_payload((uint8_t *) msg, MSGLEN); 	 //get the payload into data
 #endif
 			if (rf_is_rxed_payload_on_pipe_1_in_status_val(status)) {
 				state = 1;
@@ -194,22 +197,22 @@ uint8_t rfread(MESSAGE_T *msg, uint16_t timeout) {
 		}
 	}
 #endif
-	rf_irq_clear(RF_STATUS_RX_DR); //clear receive interrupts in the 24LE1
+	rf_irq_clear_all(); //clear interrupts again
 	return state;
 }
 
 // non blocking read NRF24LE1 queue
 uint8_t rfreadqueue(MESSAGE_T *msg) {
 	uint8_t status;
-	rf_irq_clear(RF_STATUS_RX_DR); //clear receive interrupts in the 24LE1
 
+	rf_irq_clear_all(); //clear interrupts again
 #if EN_AES
 	status = rf_read_rx_payload((uint8_t *) aesbuf, MSGLEN); //get the payload into data
 #else
 	status = rf_read_rx_payload((uint8_t *) msg, MSGLEN); 	 //get the payload into data
 #endif
 	if (! rf_is_rxed_payload_on_pipe_1_in_status_val(status)) {
-		return 0;
+		return false;
 	}
 
 #if EN_AES
@@ -224,10 +227,10 @@ uint8_t rfreadqueue(MESSAGE_T *msg) {
 	}
 #endif
 
-	return 1;
+	return true;
 }
 
 void rfpwrDown(void) {
-    rf_irq_clear_all();
+	rf_irq_clear_all();
     rf_power_down();
 }
